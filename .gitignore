@@ -1,0 +1,27 @@
+*.o
+
+*.lib
+*.a
+
+*.dll
+*.so
+*.exe
+
+game
+game.html
+game.js
+game.data
+game.exe
+game.wasm
+
+nob
+nob.old
+
+.cache/
+.vscode/
+build/
+
+
+# Krita stuf
+*~
+

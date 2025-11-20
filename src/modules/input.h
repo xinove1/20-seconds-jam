@@ -1,0 +1,358 @@
+#ifndef XI_INPUT_ACTIONS_H
+# define XI_INPUT_ACTIONS_H
+
+# include "core.h"
+
+# ifndef MAX_ACTION_KEYCODES 
+#  define MAX_ACTION_KEYCODES 10
+# endif
+# ifndef MAX_ACTION_AXIS 
+#  define MAX_ACTION_AXIS 2
+# endif
+# ifndef MAX_ACTION_GAMEPADBUTTONS
+#  define MAX_ACTION_GAMEPADBUTTONS 4
+# endif
+# ifndef MAX_ACTION
+#  define MAX_ACTIONS 10
+# endif
+
+// Comment out or redefine if needed
+typedef enum {LEFT, RIGHT, UP, DOWN, ACTION_1, ACTION_2, ACTION_3, OPEN_MENU, INPUT_ACTION_COUNT} InputActions_e;
+
+typedef struct {
+	i32 id;
+	f32 trigger_point;
+} ActionAxis;
+
+typedef struct {
+	char *name;
+	b32  down;
+	b32  down_last_frame;
+	b32  pressed;
+	b32  released;
+	i32  keycodes[MAX_ACTION_KEYCODES];
+	i32  gamepad_button[MAX_ACTION_GAMEPADBUTTONS];
+	ActionAxis gamepad_axis[MAX_ACTION_AXIS];
+} Action;
+
+typedef struct {
+	Action  actions[MAX_ACTIONS];
+	i32 game_pad_id;
+	V2 mouse_position;
+	V2 mouse_last_position;
+	b32 mouse_moving;
+	b32 was_action_down;
+} XIInputData;
+
+XIInputData InitXIInputData(void);
+void SetXIInputData(XIInputData *data);
+void RegisterActionName(i32 action_id, byte *action_name);
+void RegisterInputKeyAction(i32 action_id, i32 keycode);
+void RegisterGamePadButtonAction(i32 action_id, i32 gamepad_button);
+void RegisterGamePadAxisAction(i32 action_id, i32 gamepad_axis, f32 trigger_deadzone);
+void SetGamePadId(i32 gamepad); // Which GamePad to use
+b32 IsActionPressed(i32 action_id);
+b32 IsActionReleased(i32 action_id);
+b32 IsActionDown(i32 action_id);
+b32 IsMouseMoving();
+b32 WasAnyActionDown();
+void PoolActions();
+void PrintActions();
+
+#endif
+
+#ifdef XI_INPUT_ACTIONS_IMPLEMENTATION
+// NOLINTBEGIN(misc-definitions-in-headers)
+
+XIInputData *d = NULL;
+
+XIInputData InitXIInputData(void)
+{
+	return (XIInputData) {
+		.actions = {0},
+		.game_pad_id = -1,
+		.mouse_position = {0, 0},
+		.mouse_last_position = {0, 0},
+		.mouse_moving = false,
+		.was_action_down = false,
+	};
+}
+
+void SetXIInputData(XIInputData *data)
+{
+	d = data;
+}
+
+
+// Which GamePad to use
+void SetGamePadId(i32 gamepad)
+{
+	Assert(d != NULL);
+	if (gamepad < 0) {
+		TraceLog(LOG_WARNING, "Trying te set gamepad to a negative number\n");
+	}
+	d->game_pad_id = gamepad;
+}
+
+b32 _CheckDown(Action *action) 
+{
+	for (i32 i = 0; i < MAX_ACTION_KEYCODES; i++) {
+		if (action->keycodes[i] == -1) break ;
+
+		if (IsKeyDown(action->keycodes[i])) {
+			return true;
+		}
+	}
+
+	// Don't check Gamepad stuff if it's unavailable
+	if (IsGamepadAvailable(d->game_pad_id) == false) {
+		return false;
+	}
+
+	for (i32 i = 0; i < MAX_ACTION_GAMEPADBUTTONS; i++) {
+		if (action->gamepad_button[i] == -1) break ;
+
+		if (IsGamepadButtonDown(d->game_pad_id, action->gamepad_button[i])) {
+			return true;
+		}
+	}
+
+	for (i32 i = 0; i < MAX_ACTION_AXIS; i++) {
+		if (action->gamepad_axis[i].id == -1) break ;
+
+		f32 f = GetGamepadAxisMovement(d->game_pad_id, action->gamepad_axis[i].id);
+		f32 trigger = action->gamepad_axis[i].trigger_point;
+		if (trigger > 0) {
+			if (f >= action->gamepad_axis[i].trigger_point) {
+				return true;
+			}
+		} else if (trigger < 0) {
+			if (f <= action->gamepad_axis[i].trigger_point) {
+				return true;
+			}
+		} else {
+			TraceLog(LOG_WARNING, "Action |%s| gamepad_axis_id %d has a trigger poi32 of 0 \n", action->name, action->gamepad_axis[i].id);
+		}
+	}
+	
+	return false;
+}
+
+void PoolActions() 
+{
+	Assert(d != NULL);
+	d->was_action_down = false;
+	for (i32 i = 0; i < MAX_ACTIONS; i++) {
+		Action *action = &d->actions[i];
+		if (action->name == NULL) continue ;
+		
+		action->down_last_frame = action->down;
+		action->down = _CheckDown(action);
+		action->pressed = false;
+		action->released = false;
+		if (action->down && action->down_last_frame == false) {
+			action->pressed = true;
+		} else if (action->down_last_frame && action->down == false) {
+			action->released = true;
+		}
+
+		if (action->down_last_frame) {
+			d->was_action_down = true;
+		}
+	}
+	d->mouse_moving = false;
+	d->mouse_last_position = d->mouse_position;
+	d->mouse_position = GetMousePosition();
+	if (!(d->mouse_position.x == d->mouse_last_position.x && d->mouse_position.y == d->mouse_last_position.y)) {
+		d->mouse_moving = true;
+	}
+}
+
+Action *_GetAction(i32 id) // TODO inline this?
+{
+	// TODO  Better error message to account to error on registering and getting input
+	if (id < 0) {
+		TraceLog(LOG_WARNING, "Tryng to register a Key action with negative value, aborting.\n");
+		return (NULL);
+	} else if (id >= MAX_ACTIONS) {
+		TraceLog(LOG_WARNING, "Tryng to register a Key action with value greater/equal than MAX_ACTIONS, aborting.\n");
+		return (NULL);
+	}
+	return (&d->actions[id]);
+}
+
+void RegisterActionName(i32 action_id, byte *action_name)
+{
+	Assert(d != NULL);
+	if (action_name == NULL) {
+		TraceLog(LOG_WARNING, "Tryng to register a action with null name, aborting.\n");
+		return ;
+	}
+	
+	Action *action = _GetAction(action_id);
+	if (action == NULL) {
+		return ;
+	}
+
+	if (action->name == NULL) {
+		TraceLog(LOG_DEBUG, "Action \"%s\" does not exists, registering new action.\n", action_name);
+		action->name = action_name;
+	} else {
+		TraceLog(LOG_DEBUG, "Overwriting action name \"%s\" with \"%s\".\n", action->name, action_name);
+		action->name = action_name;
+	}
+
+	action->down_last_frame = false;
+	action->down = false;
+
+	for (i32 i = 0; i < MAX_ACTION_KEYCODES; i++) {
+		action->keycodes[i] = -1;
+	}
+
+	for (i32 i = 0; i < MAX_ACTION_GAMEPADBUTTONS; i++) {
+		action->gamepad_button[i] = -1;
+	}
+
+	for (i32 i = 0; i < MAX_ACTION_AXIS; i++) {
+		action->gamepad_axis[i].id = -1;
+	}
+}
+
+// Register a keycode to a action, only works on action already named (so the keycodes can be set to -1)
+void RegisterInputKeyAction(i32 action_id, i32 action_keycode)
+{
+	Assert(d != NULL);
+	Action *action = _GetAction(action_id);
+	if (action == NULL) {
+		return ;
+	}
+
+	for (i32 i = 0; i < MAX_ACTION_KEYCODES; i++) {
+		if (action->keycodes[i] == -1) {
+			action->keycodes[i] = action_keycode;
+			return ;
+		}
+	}
+	
+	char *action_name = action->name;
+	if (action_name == NULL) {
+		action_name = (char *)"Unamned action";
+	}
+
+	TraceLog(LOG_WARNING, "Action \"%s\" keycodes are full. See MAX_ACTION_KEYCODES macro.\n", action_name);
+	return ;
+}
+
+void RegisterGamePadButtonAction(i32 action_id, i32 gamepad_button) 
+{
+	Assert(d != NULL);
+	Action *action = _GetAction(action_id);
+	if (action == NULL) {
+		return ;
+	}
+
+	for (i32 i = 0; i < MAX_ACTION_GAMEPADBUTTONS; i++) {
+		if (action->gamepad_button[i] == -1) {
+			action->gamepad_button[i] = gamepad_button;
+			return ;
+		}
+	}
+	
+	char *action_name = action->name;
+	if (action_name == NULL) {
+		action_name = (char *)"Unamned action";
+	}
+
+	TraceLog(LOG_WARNING, "Action \"%s\" GamepadButtons are full. See MAX_ACTION_GAMEPADBUTTONS macro.\n", action_name);
+	return ;
+}
+
+void RegisterGamePadAxisAction(i32 action_id, i32 gamepad_axis, f32 trigger_point)
+{
+	Assert(d != NULL);
+	Action *action = _GetAction(action_id);
+	if (action == NULL) {
+		return ;
+	}
+
+	for (i32 i = 0; i < MAX_ACTION_AXIS; i++) {
+		if (action->gamepad_axis[i].id == -1) {
+			action->gamepad_axis[i].id = gamepad_axis;
+			action->gamepad_axis[i].trigger_point = trigger_point;
+			return ;
+		}
+	}
+	
+	char *action_name = action->name;
+	if (action_name == NULL) {
+		action_name = (char *)"Unamned action";
+	}
+
+	TraceLog(LOG_WARNING, "Action \"%s\" GamepadAxis are full. See MAX_ACTION_AXIS macro.\n", action_name);
+	return ;
+}
+
+
+b32 IsActionPressed(i32 action_id)
+{
+	Assert(d != NULL);
+	Action *action = _GetAction(action_id);
+	if (action == NULL) {
+		TraceLog(LOG_WARNING, "IsActionPressed: action_id %d, not found", action_id);
+		return false;
+	}
+	return (action->pressed);
+}
+
+b32 IsActionReleased(i32 action_id)
+{
+	Action *action = _GetAction(action_id);
+	if (action == NULL) {
+		TraceLog(LOG_WARNING, "IsActionReleased: action_id %d, not found", action_id);
+		return false;
+	}
+	return (action->released);
+}
+
+b32 IsActionDown(i32 action_id)
+{
+	Assert(d != NULL);
+	Action *action = _GetAction(action_id);
+	if (action == NULL) {
+		TraceLog(LOG_WARNING, "IsActionDown: action_id %d, not found", action_id);
+		return false;
+	}
+	return (action->down);
+}
+
+b32 IsMouseMoving() 
+{
+	Assert(d != NULL);
+	return (d->mouse_moving);
+}
+
+b32 WasAnyActionDown()
+{
+	Assert(d != NULL);
+	return (d->was_action_down);
+}
+
+void PrintActions() {
+	Assert(d != NULL);
+	TraceLog(LOG_INFO, "Actions list\n");
+	TraceLog(LOG_INFO, "~~~~~~~~~~~~\n");
+	for (i32 i = 0; i < MAX_ACTIONS; i++) {
+		if (d->actions[i].name == NULL) {
+			TraceLog(LOG_INFO, "Unamned action: \n");
+		} else {
+			TraceLog(LOG_INFO, "%s: \n", d->actions[i].name);
+		}
+		for (i32 k = 0; k < MAX_ACTION_KEYCODES; k++) {
+			if (d->actions[i].keycodes[k] == -1) break ;
+			TraceLog(LOG_INFO, "  %d\n", d->actions[i].keycodes[k]);
+		}
+	}
+}
+
+// NOLINTEND(misc-definitions-in-headers)
+#endif 
